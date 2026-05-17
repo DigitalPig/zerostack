@@ -45,6 +45,20 @@ async fn handle_model(parts: &[&str], ctx: &mut SlashCtx<'_>) -> anyhow::Result<
             ctx.renderer,
             format!("current model: {}", ctx.session.model),
         );
+        let custom = ctx.cfg.custom_providers_map();
+        let models = crate::provider::fetch_available_models(
+            ctx.cli.resolve_provider(ctx.cfg).as_str(),
+            &custom,
+        )
+        .await;
+        if models.is_empty() {
+            write_ok(
+                ctx.renderer,
+                "(no model list for this provider — use /model <name>)",
+            );
+        } else {
+            ctx.input.start_model_picker(models, ctx.session.model.as_str());
+        }
         return Ok(());
     }
     let new_model = compact_str::CompactString::new(parts[1].trim());

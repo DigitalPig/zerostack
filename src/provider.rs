@@ -489,6 +489,184 @@ async fn build_openai_agent(
 }
 
 #[allow(clippy::too_many_arguments)]
+fn fallback_models(kind: ProviderKind) -> Vec<String> {
+    let models: &[&str] = match kind {
+        ProviderKind::OpenRouter => &[
+            "deepseek/deepseek-chat-v4-flash",
+            "deepseek/deepseek-r1",
+            "anthropic/claude-opus-4",
+            "anthropic/claude-sonnet-4-5",
+            "anthropic/claude-haiku-4-5",
+            "openai/gpt-4o",
+            "openai/gpt-4o-mini",
+            "openai/o3",
+            "openai/o3-mini",
+            "openai/o4-mini",
+            "google/gemini-2.5-pro",
+            "google/gemini-2.5-flash",
+            "google/gemini-2.5-flash-lite",
+            "meta-llama/llama-4-maverick",
+            "meta-llama/llama-4-scout",
+            "mistralai/mistral-large",
+            "mistralai/mistral-small",
+            "qwen/qwen3-235b-a22b",
+            "qwen/qwen3-30b-a3b",
+            "x-ai/grok-3",
+        ],
+        ProviderKind::Anthropic => &[
+            "claude-opus-4-5",
+            "claude-sonnet-4-5",
+            "claude-haiku-4-5-20251001",
+        ],
+        ProviderKind::OpenAI => &[
+            "gpt-4o",
+            "gpt-4o-mini",
+            "o1",
+            "o3",
+            "o3-mini",
+            "o4-mini",
+        ],
+        ProviderKind::Gemini => &[
+            "gemini-2.5-pro",
+            "gemini-2.5-flash",
+            "gemini-2.5-flash-lite",
+            "gemini-1.5-pro",
+            "gemini-1.5-flash",
+        ],
+        ProviderKind::Ollama => &[],
+    };
+    models.iter().map(|s| s.to_string()).collect()
+}
+
+pub async fn fetch_available_models(
+    provider_name: &str,
+    custom_providers: &HashMap<String, CustomProviderConfig>,
+) -> Vec<String> {
+    let config = match resolve_provider_config(provider_name, custom_providers) {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+
+    let api_key = crate::auth::AuthResolver::new(config.kind)
+        .with_env_override(config.api_key_env.as_deref())
+        .resolve()
+        .unwrap_or_default();
+
+    match fetch_models_from_api(config.kind, &api_key, config.base_url.as_deref()).await {
+        Ok(models) if !models.is_empty() => models,
+        _ => fallback_models(config.kind),
+    }
+}
+
+async fn fetch_models_from_api(
+    kind: ProviderKind,
+    api_key: &str,
+    base_url: Option<&str>,
+) -> anyhow::Result<Vec<String>> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(8))
+        .build()?;
+
+    match kind {
+        ProviderKind::OpenRouter => {
+            let base = base_url.unwrap_or("https://openrouter.ai");
+            let resp: serde_json::Value = client
+                .get(format!("{}/api/v1/models", base))
+                .bearer_auth(api_key)
+                .send()
+                .await?
+                .json()
+                .await?;
+            parse_openai_models_response(resp)
+        }
+        ProviderKind::OpenAI => {
+            let base = base_url.unwrap_or("https://api.openai.com");
+            let resp: serde_json::Value = client
+                .get(format!("{}/v1/models", base))
+                .bearer_auth(api_key)
+                .send()
+                .await?
+                .json()
+                .await?;
+            let mut models = parse_openai_models_response(resp)?;
+            // keep only chat/reasoning models
+            models.retain(|id| {
+                id.starts_with("gpt-")
+                    || id.starts_with("o1")
+                    || id.starts_with("o3")
+                    || id.starts_with("o4")
+            });
+            models.sort();
+            Ok(models)
+        }
+        ProviderKind::Anthropic => {
+            let base = base_url.unwrap_or("https://api.anthropic.com");
+            let resp: serde_json::Value = client
+                .get(format!("{}/v1/models", base))
+                .header("x-api-key", api_key)
+                .header("anthropic-version", "2023-06-01")
+                .send()
+                .await?
+                .json()
+                .await?;
+            parse_openai_models_response(resp)
+        }
+        ProviderKind::Gemini => {
+            let base = base_url.unwrap_or("https://generativelanguage.googleapis.com");
+            let resp: serde_json::Value = client
+                .get(format!("{}/v1beta/models?key={}", base, api_key))
+                .send()
+                .await?
+                .json()
+                .await?;
+            let arr = resp
+                .get("models")
+                .and_then(|v| v.as_array())
+                .ok_or_else(|| anyhow::anyhow!("unexpected response"))?;
+            let mut models: Vec<String> = arr
+                .iter()
+                .filter_map(|m| m.get("name")?.as_str())
+                .filter(|n| n.contains("gemini"))
+                .map(|n| n.trim_start_matches("models/").to_string())
+                .collect();
+            models.sort();
+            Ok(models)
+        }
+        ProviderKind::Ollama => {
+            let base = base_url.unwrap_or("http://localhost:11434");
+            let resp: serde_json::Value = client
+                .get(format!("{}/api/tags", base))
+                .send()
+                .await?
+                .json()
+                .await?;
+            let arr = resp
+                .get("models")
+                .and_then(|v| v.as_array())
+                .ok_or_else(|| anyhow::anyhow!("unexpected response"))?;
+            let mut models: Vec<String> = arr
+                .iter()
+                .filter_map(|m| m.get("name")?.as_str().map(|s| s.to_string()))
+                .collect();
+            models.sort();
+            Ok(models)
+        }
+    }
+}
+
+fn parse_openai_models_response(resp: serde_json::Value) -> anyhow::Result<Vec<String>> {
+    let arr = resp
+        .get("data")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| anyhow::anyhow!("unexpected response format"))?;
+    let mut models: Vec<String> = arr
+        .iter()
+        .filter_map(|m| m.get("id")?.as_str().map(|s| s.to_string()))
+        .collect();
+    models.sort();
+    Ok(models)
+}
+
 pub async fn build_agent(
     model: AnyModel,
     cli: &Cli,

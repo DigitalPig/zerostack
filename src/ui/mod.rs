@@ -4,6 +4,7 @@ mod events;
 pub(crate) mod input;
 mod markdown;
 mod permission_handler;
+pub(crate) mod model_picker;
 pub(crate) mod picker;
 pub(crate) mod renderer;
 mod slash;
@@ -36,6 +37,7 @@ use crate::ui::event_handler::{ensure_agent, handle_agent_event};
 use crate::ui::events::{render_session, sanitize_output};
 use crate::ui::input::InputEditor;
 use crate::ui::permission_handler::handle_permission_request;
+use crate::ui::model_picker::ModelPickerAction;
 use crate::ui::renderer::{Renderer, copy_to_clipboard};
 use crate::ui::slash::{handle_compress, handle_slash};
 use crate::ui::status::StatusLine;
@@ -423,6 +425,35 @@ pub async fn run_interactive(
                             _ => {}
                         }
 
+                        if input.model_picker.as_ref().is_some_and(|p| p.active) {
+                            match input.handle_model_picker_key(key) {
+                                ModelPickerAction::Selected(model_name) => {
+                                    let slash_cmd = format!("/model {}", model_name);
+                                    #[cfg(feature = "mcp")]
+                                    let mcp_ref = ensure_mcp_manager(&mut mcp_manager, cfg).await;
+                                    let result = handle_slash(
+                                        &slash_cmd,
+                                        &mut agent, &mut client, &mut renderer, session,
+                                        cli, cfg, context,
+                                        &mut show_reasoning, &mut reasoning_enabled, &mut is_running,
+                                        &mut input, &permission, &ask_tx,
+                                        &mut todo_tools_enabled, &sandbox,
+                                        #[cfg(feature = "loop")] &mut loop_state,
+                                        #[cfg(feature = "mcp")] mcp_ref,
+                                    ).await;
+                                    if let Err(e) = result {
+                                        renderer.write_line(&format!("error: {}", e), C_ERROR)?;
+                                    }
+                                }
+                                ModelPickerAction::Cancelled | ModelPickerAction::Continue => {}
+                            }
+                            refresh_display(&mut renderer, &input, session, is_running, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref())?;
+                            if let Some(ref mp) = input.model_picker {
+                                if mp.active { mp.draw()?; }
+                            }
+                            continue;
+                        }
+
                         if input.picker.as_ref().is_some_and(|p| p.active())
                             && input.handle_picker_key(key) {
                                 refresh_display(&mut renderer, &input, session, is_running, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref())?;
@@ -630,6 +661,18 @@ pub async fn run_interactive(
                             renderer.draw_bottom(&input.buffer, input.cursor, &status, is_running)?;
                             if let Some(ref picker) = input.picker {
                                 picker.draw()?;
+                            }
+                        }
+                        let model_picker_active = input
+                            .model_picker
+                            .as_ref()
+                            .is_some_and(|p| p.active);
+                        if model_picker_active {
+                            renderer.scroll_to_bottom()?;
+                            let status = StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref());
+                            renderer.draw_bottom(&input.buffer, input.cursor, &status, is_running)?;
+                            if let Some(ref mp) = input.model_picker {
+                                mp.draw()?;
                             }
                         }
                     }

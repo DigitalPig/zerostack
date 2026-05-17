@@ -15,6 +15,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::io::Write;
 
 use crate::ui::cmd_picker::{CommandPicker, ModelsPicker, PromptPicker, ThemePicker};
+use crate::ui::model_picker::{ModelPicker, ModelPickerAction};
 use crate::ui::picker::FilePicker;
 
 const MAX_KILL_RING: usize = 30;
@@ -26,6 +27,7 @@ pub struct InputEditor {
     history_pos: Option<usize>,
     draft: Option<CompactString>,
     pub picker: Option<Picker>,
+    pub model_picker: Option<ModelPicker>,
     monochrome: bool,
     prompt_names: Vec<String>,
     theme_names: Vec<String>,
@@ -45,6 +47,7 @@ impl InputEditor {
             history_pos: None,
             draft: None,
             picker: None,
+            model_picker: None,
             monochrome: false,
             prompt_names: Vec::new(),
             theme_names: Vec::new(),
@@ -68,6 +71,65 @@ impl InputEditor {
         self.monochrome = monochrome;
         if let Some(ref mut picker) = self.picker {
             picker.set_monochrome(monochrome);
+        }
+        if let Some(ref mut mp) = self.model_picker {
+            mp.set_monochrome(monochrome);
+        }
+    }
+
+    pub fn start_model_picker(&mut self, items: Vec<String>, current: &str) {
+        let mp = self.model_picker.get_or_insert_with(ModelPicker::new);
+        mp.set_monochrome(self.monochrome);
+        mp.activate(items, current);
+    }
+
+    pub fn handle_model_picker_key(&mut self, key: KeyEvent) -> ModelPickerAction {
+        let mp = match self.model_picker.as_mut() {
+            Some(p) if p.active => p,
+            _ => return ModelPickerAction::Continue,
+        };
+        match key.code {
+            KeyCode::Char(c)
+                if c == '\x08'
+                    || (c == 'h' && key.modifiers.contains(KeyModifiers::CONTROL)) =>
+            {
+                mp.backspace();
+                ModelPickerAction::Continue
+            }
+            KeyCode::Char(c) => {
+                mp.char_input(c);
+                ModelPickerAction::Continue
+            }
+            KeyCode::Backspace => {
+                if !mp.backspace() {
+                    mp.deactivate();
+                    return ModelPickerAction::Cancelled;
+                }
+                ModelPickerAction::Continue
+            }
+            KeyCode::Tab => {
+                if key.modifiers.contains(KeyModifiers::SHIFT) {
+                    mp.select_prev();
+                } else {
+                    mp.select_next();
+                }
+                ModelPickerAction::Continue
+            }
+            KeyCode::Up => { mp.select_prev(); ModelPickerAction::Continue }
+            KeyCode::Down => { mp.select_next(); ModelPickerAction::Continue }
+            KeyCode::Enter => {
+                let selected = mp.selected_model().map(|s| s.to_string());
+                mp.deactivate();
+                match selected {
+                    Some(name) => ModelPickerAction::Selected(name),
+                    None => ModelPickerAction::Cancelled,
+                }
+            }
+            KeyCode::Esc => {
+                mp.deactivate();
+                ModelPickerAction::Cancelled
+            }
+            _ => ModelPickerAction::Continue,
         }
     }
 
